@@ -1,40 +1,43 @@
-"""Compute depth maps for images in the input folder.
-"""
 import os
-import glob
 import torch
 import cv2
 import argparse
-
 import util.io
-
 from torchvision.transforms import Compose
 
 from dpt.models import DPTDepthModel
-from dpt.midas_net import MidasNet_large
 from dpt.transforms import Resize, NormalizeImage, PrepareForNet
 
-#from util.misc import visualize_attention
+
+models = {
+    "midas_v21": "weights/midas_v21-f6b98070.pt",
+    "dpt_large": "weights/dpt_large-midas-2f21e586.pt",
+    "dpt_hybrid": "weights/dpt_hybrid-midas-501f0c75.pt",
+    "dpt_hybrid_kitti": "weights/dpt_hybrid_kitti-cb926ef4.pt",
+    "dpt_hybrid_nyu": "weights/dpt_hybrid_nyu-2ce69ec7.pt",
+}
 
 
-def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=True):
+def run(input_path, output_dir, model_type="dpt_hybrid", optimize=True):
     """Run MonoDepthNN to compute depth maps.
 
     Args:
-        input_path (str): path to input folder
-        output_path (str): path to output folder
-        model_path (str): path to saved model
+        input_path (str): input filepath
+        output_dir (str): output directory
+        model_type (str): type of model (dpt_large | dpt_large, dpt_hybrid, dpt_hybrid_kitti, dpt_hybrid_nyu)
+        optimize (bool):
     """
-    print("initialize")
+    print("Initializing...")
+
+    print(f'Using model {model_type}')
+    model_path = f'{os.path.dirname(__file__)}/{models[model_type]}'
 
     # select device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device: %s" % device)
-
-    print(f'using model {model_type}')
+    print("Device: %s" % device)
 
     # load network
-    if model_type == "dpt_large":  # DPT-Large
+    if model_type == "dpt_large":
         net_w = net_h = 384
         model = DPTDepthModel(
             path=model_path,
@@ -43,7 +46,7 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
             enable_attention_hooks=False,
         )
         normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    elif model_type == "dpt_hybrid":  # DPT-Hybrid
+    elif model_type == "dpt_hybrid":
         net_w = net_h = 384
         model = DPTDepthModel(
             path=model_path,
@@ -55,7 +58,6 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
     elif model_type == "dpt_hybrid_kitti":
         net_w = 1216
         net_h = 352
-
         model = DPTDepthModel(
             path=model_path,
             scale=0.00006016,
@@ -65,12 +67,10 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
             non_negative=True,
             enable_attention_hooks=False,
         )
-
         normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     elif model_type == "dpt_hybrid_nyu":
         net_w = 640
         net_h = 480
-
         model = DPTDepthModel(
             path=model_path,
             scale=0.000305,
@@ -80,19 +80,9 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
             non_negative=True,
             enable_attention_hooks=False,
         )
-
         normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    elif model_type == "midas_v21":  # Convolutional model
-        net_w = net_h = 384
-
-        model = MidasNet_large(model_path, non_negative=True)
-        normalization = NormalizeImage(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
     else:
-        assert (
-            False
-        ), f"model_type '{model_type}' not implemented, use: --model_type [dpt_large|dpt_hybrid|dpt_hybrid_kitti|dpt_hybrid_nyu|midas_v21]"
+        raise ValueError(f"model_type '{model_type}' not implemented, see help for parameter --model_type")
 
     transform = Compose(
         [
@@ -112,21 +102,41 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
 
     model.eval()
 
-    if optimize == True and device == torch.device("cuda"):
+    if optimize and device == torch.device("cuda"):
         model = model.to(memory_format=torch.channels_last)
         model = model.half()
 
     model.to(device)
 
-    print("processing {}".format(input_path))
+    if os.path.isdir(input_path):
+        for image_path in os.listdir(input_path):
+            if '.jpg' in image_path or '.png' in image_path:
+                prediction = predict_depth(os.path.join(input_path, image_path), device, transform, model, model_type, output_dir, optimize)
 
-    img = util.io.read_image(input_path)
+                output_filename = output_dir + '/' + os.path.basename(image_path).split('.')[0] + '_depth'
+                print(f'Saving to {output_filename}')
+                util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
+
+    else:
+        prediction = predict_depth(input_path, device, transform, model, model_type, output_dir, optimize)
+
+        output_filename = output_dir + '/' + os.path.basename(input_path).split('.')[0] + '_depth'
+        print(f'Saving to {output_filename}')
+        util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
+
+    print("finished")
+
+
+def predict_depth(filepath: str, device, transform, model, model_type, output_dir, optimize: bool):
+    print(f'Processing {filepath}')
+
+    img = util.io.read_image(filepath)
 
     if args.kitti_crop is True:
         height, width, _ = img.shape
         top = height - 352
         left = (width - 1216) // 2
-        img = img[top : top + 352, left : left + 1216, :]
+        img = img[top: top + 352, left: left + 1216, :]
 
     img_input = transform({"image": img})["image"]
 
@@ -156,35 +166,27 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
 
         if model_type == "dpt_hybrid_nyu":
             prediction *= 1000.0
-    print(f'Saving to {output_path}')
-    util.io.write_depth(output_path, prediction, bits=2, absolute_depth=args.absolute_depth)
 
-    print("finished")
+    return prediction
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "input_path", help="input image"
+        "input", help="input image / folder"
     )
 
     parser.add_argument(
-        "-o",
-        "--output_path",
-        default="output_monodepth",
-        help="folder for output image",
+        "-o", "--output_dir",
+        default=None,
+        help="folder for output image, if not provided, will save next to input image",
     )
 
     parser.add_argument(
-        "-m", "--model_weights", default=None, help="path to model weights"
-    )
-
-    parser.add_argument(
-        "-t",
-        "--model_type",
+        "-t", "--model_type",
         default="dpt_large",
-        help="model type [dpt_large|dpt_hybrid|midas_v21]",
+        help="model type [dpt_large | dpt_large, dpt_hybrid, dpt_hybrid_kitti, dpt_hybrid_nyu]",
     )
 
     parser.add_argument("--kitti_crop", dest="kitti_crop", action="store_true")
@@ -199,18 +201,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    default_models = {
-        "midas_v21": "weights/midas_v21-f6b98070.pt",
-        "dpt_large": "weights/dpt_large-midas-2f21e586.pt",
-        "dpt_hybrid": "weights/dpt_hybrid-midas-501f0c75.pt",
-        "dpt_hybrid_kitti": "weights/dpt_hybrid_kitti-cb926ef4.pt",
-        "dpt_hybrid_nyu": "weights/dpt_hybrid_nyu-2ce69ec7.pt",
-    }
-
-    if args.model_weights is None:
-        args.model_weights = f'{os.path.dirname(__file__)}/{default_models[args.model_type]}'
-
-    args.output_path = args.input_path.split('.')[0] + '_depth'
+    # prepare output folder
+    if not args.output_dir:
+        args.output_dir = os.path.dirname(args.input)
+    else:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     # set torch options
     torch.backends.cudnn.enabled = True
@@ -218,9 +213,8 @@ if __name__ == "__main__":
 
     # compute depth maps
     run(
-        args.input_path,
-        args.output_path,
-        args.model_weights,
+        args.input,
+        args.output_dir,
         args.model_type,
         args.optimize,
     )

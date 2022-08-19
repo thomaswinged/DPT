@@ -4,170 +4,186 @@ import cv2
 import argparse
 import util.io
 from torchvision.transforms import Compose
+from attrs import define, field
 
 from dpt.models import DPTDepthModel
 from dpt.transforms import Resize, NormalizeImage, PrepareForNet
 
 
-models = {
-    "midas_v21": "weights/midas_v21-f6b98070.pt",
-    "dpt_large": "weights/dpt_large-midas-2f21e586.pt",
-    "dpt_hybrid": "weights/dpt_hybrid-midas-501f0c75.pt",
-    "dpt_hybrid_kitti": "weights/dpt_hybrid_kitti-cb926ef4.pt",
-    "dpt_hybrid_nyu": "weights/dpt_hybrid_nyu-2ce69ec7.pt",
-}
-
-
-def run(input_path, output_dir, model_type="dpt_hybrid", optimize=True):
-    """Run MonoDepthNN to compute depth maps.
-
-    Args:
-        input_path (str): input filepath
-        output_dir (str): output directory
-        model_type (str): type of model (dpt_large | dpt_large, dpt_hybrid, dpt_hybrid_kitti, dpt_hybrid_nyu)
-        optimize (bool):
+@define
+class DPTMonoDepth:
     """
-    print("Initializing...")
+    model_type (str): type of model (dpt_large | dpt_large, dpt_hybrid, dpt_hybrid_kitti, dpt_hybrid_nyu)
+    optimize (bool):
+    """
+    model_type: str = field(default='dpt_hybrid')
+    optimize: bool = field(default=True)
 
-    print(f'Using model {model_type}')
-    model_path = f'{os.path.dirname(__file__)}/{models[model_type]}'
+    device = field(init=False)
+    model = field(init=False)
+    transform = field(init=False)
 
-    # select device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device: %s" % device)
+    models = {
+        "midas_v21": "weights/midas_v21-f6b98070.pt",
+        "dpt_large": "weights/dpt_large-midas-2f21e586.pt",
+        "dpt_hybrid": "weights/dpt_hybrid-midas-501f0c75.pt",
+        "dpt_hybrid_kitti": "weights/dpt_hybrid_kitti-cb926ef4.pt",
+        "dpt_hybrid_nyu": "weights/dpt_hybrid_nyu-2ce69ec7.pt",
+    }
 
-    # load network
-    if model_type == "dpt_large":
-        net_w = net_h = 384
-        model = DPTDepthModel(
-            path=model_path,
-            backbone="vitl16_384",
-            non_negative=True,
-            enable_attention_hooks=False,
-        )
-        normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    elif model_type == "dpt_hybrid":
-        net_w = net_h = 384
-        model = DPTDepthModel(
-            path=model_path,
-            backbone="vitb_rn50_384",
-            non_negative=True,
-            enable_attention_hooks=False,
-        )
-        normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    elif model_type == "dpt_hybrid_kitti":
-        net_w = 1216
-        net_h = 352
-        model = DPTDepthModel(
-            path=model_path,
-            scale=0.00006016,
-            shift=0.00579,
-            invert=True,
-            backbone="vitb_rn50_384",
-            non_negative=True,
-            enable_attention_hooks=False,
-        )
-        normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    elif model_type == "dpt_hybrid_nyu":
-        net_w = 640
-        net_h = 480
-        model = DPTDepthModel(
-            path=model_path,
-            scale=0.000305,
-            shift=0.1378,
-            invert=True,
-            backbone="vitb_rn50_384",
-            non_negative=True,
-            enable_attention_hooks=False,
-        )
-        normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    else:
-        raise ValueError(f"model_type '{model_type}' not implemented, see help for parameter --model_type")
+    def __attrs_post_init__(self):
+        print("Initializing...")
 
-    transform = Compose(
-        [
-            Resize(
-                net_w,
-                net_h,
-                resize_target=None,
-                keep_aspect_ratio=True,
-                ensure_multiple_of=32,
-                resize_method="minimal",
-                image_interpolation_method=cv2.INTER_CUBIC,
-            ),
-            normalization,
-            PrepareForNet(),
-        ]
-    )
+        # select device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("Device: %s" % self.device)
 
-    model.eval()
+        self.model, self.transform = self._prepare_model()
 
-    if optimize and device == torch.device("cuda"):
-        model = model.to(memory_format=torch.channels_last)
-        model = model.half()
+    def _prepare_model(self) -> tuple:
+        print(f'Using model {self.model_type}')
+        model_path = f'{os.path.dirname(__file__)}/{self.models[self.model_type]}'
 
-    model.to(device)
-
-    if os.path.isdir(input_path):
-        for image_path in os.listdir(input_path):
-            if '.jpg' in image_path or '.png' in image_path:
-                prediction = predict_depth(os.path.join(input_path, image_path), device, transform, model, model_type, output_dir, optimize)
-
-                output_filename = output_dir + '/' + os.path.basename(image_path).split('.')[0] + '_depth'
-                print(f'Saving to {output_filename}')
-                util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
-
-    else:
-        prediction = predict_depth(input_path, device, transform, model, model_type, output_dir, optimize)
-
-        output_filename = output_dir + '/' + os.path.basename(input_path).split('.')[0] + '_depth'
-        print(f'Saving to {output_filename}')
-        util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
-
-    print("finished")
-
-
-def predict_depth(filepath: str, device, transform, model, model_type, output_dir, optimize: bool):
-    print(f'Processing {filepath}')
-
-    img = util.io.read_image(filepath)
-
-    if args.kitti_crop is True:
-        height, width, _ = img.shape
-        top = height - 352
-        left = (width - 1216) // 2
-        img = img[top: top + 352, left: left + 1216, :]
-
-    img_input = transform({"image": img})["image"]
-
-    # compute
-    with torch.no_grad():
-        sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
-
-        if optimize == True and device == torch.device("cuda"):
-            sample = sample.to(memory_format=torch.channels_last)
-            sample = sample.half()
-
-        prediction = model.forward(sample)
-        prediction = (
-            torch.nn.functional.interpolate(
-                prediction.unsqueeze(1),
-                size=img.shape[:2],
-                mode="bicubic",
-                align_corners=False,
+        # load network
+        if self.model_type == "dpt_large":
+            net_w = net_h = 384
+            model = DPTDepthModel(
+                path=model_path,
+                backbone="vitl16_384",
+                non_negative=True,
+                enable_attention_hooks=False,
             )
-            .squeeze()
-            .cpu()
-            .numpy()
+            normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        elif self.model_type == "dpt_hybrid":
+            net_w = net_h = 384
+            model = DPTDepthModel(
+                path=model_path,
+                backbone="vitb_rn50_384",
+                non_negative=True,
+                enable_attention_hooks=False,
+            )
+            normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        elif self.model_type == "dpt_hybrid_kitti":
+            net_w = 1216
+            net_h = 352
+            model = DPTDepthModel(
+                path=model_path,
+                scale=0.00006016,
+                shift=0.00579,
+                invert=True,
+                backbone="vitb_rn50_384",
+                non_negative=True,
+                enable_attention_hooks=False,
+            )
+            normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        elif self.model_type == "dpt_hybrid_nyu":
+            net_w = 640
+            net_h = 480
+            model = DPTDepthModel(
+                path=model_path,
+                scale=0.000305,
+                shift=0.1378,
+                invert=True,
+                backbone="vitb_rn50_384",
+                non_negative=True,
+                enable_attention_hooks=False,
+            )
+            normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        else:
+            raise ValueError(f"model_type '{self.model_type}' not implemented, see help for parameter --model_type")
+
+        model.eval()
+
+        if self.optimize and self.device == torch.device("cuda"):
+            model = model.to(memory_format=torch.channels_last)
+            model = model.half()
+
+        model.to(self.device)
+
+        transform = Compose(
+            [
+                Resize(
+                    net_w,
+                    net_h,
+                    resize_target=None,
+                    keep_aspect_ratio=True,
+                    ensure_multiple_of=32,
+                    resize_method="minimal",
+                    image_interpolation_method=cv2.INTER_CUBIC,
+                ),
+                normalization,
+                PrepareForNet(),
+            ]
         )
 
-        if model_type == "dpt_hybrid_kitti":
-            prediction *= 256
+        return model, transform
 
-        if model_type == "dpt_hybrid_nyu":
-            prediction *= 1000.0
+    def run(self, input_path: str, output_dir: str):
+        """Run MonoDepthNN to compute depth maps for given path
 
-    return prediction
+        input_path (str): input dir or filename
+        output_dir (str): output directory
+        """
+
+        if os.path.isdir(input_path):
+            for image_path in os.listdir(input_path):
+                if '.jpg' in image_path or '.png' in image_path:
+                    prediction = self.predict_depth(os.path.join(input_path, image_path))
+
+                    output_filename = output_dir + '/' + os.path.basename(image_path).split('.')[0] + '_depth'
+                    print(f'Saving to {output_filename}')
+                    util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
+
+        else:
+            prediction = self.predict_depth(input_path)
+
+            output_filename = output_dir + '/' + os.path.basename(input_path).split('.')[0] + '_depth'
+            print(f'Saving to {output_filename}')
+            util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
+
+        print("finished")
+
+    def predict_depth(self, filepath: str):
+        print(f'Processing {filepath}')
+
+        img = util.io.read_image(filepath)
+
+        if args.kitti_crop is True:
+            height, width, _ = img.shape
+            top = height - 352
+            left = (width - 1216) // 2
+            img = img[top: top + 352, left: left + 1216, :]
+
+        img_input = self.transform({"image": img})["image"]
+
+        # compute
+        with torch.no_grad():
+            sample = torch.from_numpy(img_input).to(self.device).unsqueeze(0)
+
+            if self.optimize == True and self.device == torch.device("cuda"):
+                sample = sample.to(memory_format=torch.channels_last)
+                sample = sample.half()
+
+            prediction = self.model.forward(sample)
+            prediction = (
+                torch.nn.functional.interpolate(
+                    prediction.unsqueeze(1),
+                    size=img.shape[:2],
+                    mode="bicubic",
+                    align_corners=False,
+                )
+                .squeeze()
+                .cpu()
+                .numpy()
+            )
+
+            if self.model_type == "dpt_hybrid_kitti":
+                prediction *= 256
+
+            if self.model_type == "dpt_hybrid_nyu":
+                prediction *= 1000.0
+
+        return prediction
 
 
 if __name__ == "__main__":
@@ -212,9 +228,10 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
 
     # compute depth maps
-    run(
-        args.input,
-        args.output_dir,
+    DPTMonoDepth(
         args.model_type,
-        args.optimize,
+        args.optimize
+    ).run(
+        args.input,
+        args.output_dir
     )

@@ -2,3 +2,9 @@ torch==1.8.1
 torchvision==0.9.1
 opencv-python==4.5.2.54
 timm==0.4.5
+
+numpy~=1.21.6
+Pillow~=9.2.0
+dpt~=0.0.1.dev1
+setuptools~=60.2.0
+attrs~=22.1.0

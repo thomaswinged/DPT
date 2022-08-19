@@ -31,6 +31,8 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device: %s" % device)
 
+    print(f'using model {model_type}')
+
     # load network
     if model_type == "dpt_large":  # DPT-Large
         net_w = net_h = 384
@@ -116,62 +118,46 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
 
     model.to(device)
 
-    # get input
-    img_names = glob.glob(os.path.join(input_path, "*"))
-    num_images = len(img_names)
+    print("processing {}".format(input_path))
 
-    # create output folder
-    os.makedirs(output_path, exist_ok=True)
+    img = util.io.read_image(input_path)
 
-    print("start processing")
-    for ind, img_name in enumerate(img_names):
-        if os.path.isdir(img_name):
-            continue
+    if args.kitti_crop is True:
+        height, width, _ = img.shape
+        top = height - 352
+        left = (width - 1216) // 2
+        img = img[top : top + 352, left : left + 1216, :]
 
-        print("  processing {} ({}/{})".format(img_name, ind + 1, num_images))
-        # input
+    img_input = transform({"image": img})["image"]
 
-        img = util.io.read_image(img_name)
+    # compute
+    with torch.no_grad():
+        sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
 
-        if args.kitti_crop is True:
-            height, width, _ = img.shape
-            top = height - 352
-            left = (width - 1216) // 2
-            img = img[top : top + 352, left : left + 1216, :]
+        if optimize == True and device == torch.device("cuda"):
+            sample = sample.to(memory_format=torch.channels_last)
+            sample = sample.half()
 
-        img_input = transform({"image": img})["image"]
-
-        # compute
-        with torch.no_grad():
-            sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
-
-            if optimize == True and device == torch.device("cuda"):
-                sample = sample.to(memory_format=torch.channels_last)
-                sample = sample.half()
-
-            prediction = model.forward(sample)
-            prediction = (
-                torch.nn.functional.interpolate(
-                    prediction.unsqueeze(1),
-                    size=img.shape[:2],
-                    mode="bicubic",
-                    align_corners=False,
-                )
-                .squeeze()
-                .cpu()
-                .numpy()
+        prediction = model.forward(sample)
+        prediction = (
+            torch.nn.functional.interpolate(
+                prediction.unsqueeze(1),
+                size=img.shape[:2],
+                mode="bicubic",
+                align_corners=False,
             )
-
-            if model_type == "dpt_hybrid_kitti":
-                prediction *= 256
-
-            if model_type == "dpt_hybrid_nyu":
-                prediction *= 1000.0
-
-        filename = os.path.join(
-            output_path, os.path.splitext(os.path.basename(img_name))[0]
+            .squeeze()
+            .cpu()
+            .numpy()
         )
-        util.io.write_depth(filename, prediction, bits=2, absolute_depth=args.absolute_depth)
+
+        if model_type == "dpt_hybrid_kitti":
+            prediction *= 256
+
+        if model_type == "dpt_hybrid_nyu":
+            prediction *= 1000.0
+    print(f'Saving to {output_path}')
+    util.io.write_depth(output_path, prediction, bits=2, absolute_depth=args.absolute_depth)
 
     print("finished")
 
@@ -180,14 +166,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "-i", "--input_path", default="input", help="folder with input images"
+        "input_path", help="input image"
     )
 
     parser.add_argument(
         "-o",
         "--output_path",
         default="output_monodepth",
-        help="folder for output images",
+        help="folder for output image",
     )
 
     parser.add_argument(
@@ -197,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-t",
         "--model_type",
-        default="dpt_hybrid",
+        default="dpt_large",
         help="model type [dpt_large|dpt_hybrid|midas_v21]",
     )
 
@@ -222,7 +208,9 @@ if __name__ == "__main__":
     }
 
     if args.model_weights is None:
-        args.model_weights = default_models[args.model_type]
+        args.model_weights = f'{os.path.dirname(__file__)}/{default_models[args.model_type]}'
+
+    args.output_path = args.input_path.split('.')[0] + '_depth'
 
     # set torch options
     torch.backends.cudnn.enabled = True

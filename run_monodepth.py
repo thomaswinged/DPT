@@ -38,14 +38,14 @@ class DPTMonoDepth:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Device: %s" % self.device)
 
-        self.model, self.transform = self._prepare_model()
+        self.model, self.transform = self._prepare_model(self.model_type)
 
-    def _prepare_model(self) -> tuple:
-        print(f'Using model {self.model_type}')
-        model_path = f'{os.path.dirname(__file__)}/{self.models[self.model_type]}'
+    def _prepare_model(self, model_type) -> tuple:
+        print(f'Preparing model {model_type}')
+        model_path = f'{os.path.dirname(__file__)}/{self.models[model_type]}'
 
         # load network
-        if self.model_type == "dpt_large":
+        if model_type == "dpt_large":
             net_w = net_h = 384
             model = DPTDepthModel(
                 path=model_path,
@@ -54,7 +54,7 @@ class DPTMonoDepth:
                 enable_attention_hooks=False,
             )
             normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        elif self.model_type == "dpt_hybrid":
+        elif model_type == "dpt_hybrid":
             net_w = net_h = 384
             model = DPTDepthModel(
                 path=model_path,
@@ -63,7 +63,7 @@ class DPTMonoDepth:
                 enable_attention_hooks=False,
             )
             normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        elif self.model_type == "dpt_hybrid_kitti":
+        elif model_type == "dpt_hybrid_kitti":
             net_w = 1216
             net_h = 352
             model = DPTDepthModel(

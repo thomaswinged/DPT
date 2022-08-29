@@ -118,7 +118,7 @@ class DPTMonoDepth:
 
         return model, transform
 
-    def run(self, input_path: str, output_dir: str):
+    def run(self, input_path: str, output_dir: str, model_type: str):
         """Run MonoDepthNN to compute depth maps for given path
 
         input_path (str): input dir or filename
@@ -137,7 +137,7 @@ class DPTMonoDepth:
         else:
             prediction = self.predict_depth(input_path)
 
-            output_filename = output_dir + '/' + os.path.basename(input_path).split('.')[0] + '_depth'
+            output_filename = output_dir + '/' + os.path.basename(input_path).split('.')[0] + '_depth_' + model_type
             print(f'Saving to {output_filename}')
             util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
 
@@ -182,6 +182,7 @@ class DPTMonoDepth:
 
             if self.model_type == "dpt_hybrid_nyu":
                 prediction *= 1000.0
+                prediction *= -1
 
         return prediction
 
@@ -233,5 +234,6 @@ if __name__ == "__main__":
         args.optimize
     ).run(
         args.input,
-        args.output_dir
+        args.output_dir,
+        args.model_type
     )

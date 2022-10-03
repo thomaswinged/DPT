@@ -10,6 +10,39 @@ from dpt.models import DPTDepthModel
 from dpt.transforms import Resize, NormalizeImage, PrepareForNet
 
 
+models = {
+    "midas_v21": "weights/midas_v21-f6b98070.pt",
+    "dpt_large": "weights/dpt_large-midas-2f21e586.pt",
+    "dpt_hybrid": "weights/dpt_hybrid-midas-501f0c75.pt",
+    "dpt_hybrid_kitti": "weights/dpt_hybrid_kitti-cb926ef4.pt",
+    "dpt_hybrid_nyu": "weights/dpt_hybrid_nyu-2ce69ec7.pt",
+}
+
+
+@define
+class DepthMap:
+    input_filepath: str = field()
+    prediction = field()
+    model_type: str = field()
+    absolute: bool = field()
+
+    def __mul__(self, other: 'DepthMap'):
+        new_filepath = os.path.join(
+            os.path.dirname(self.input_filepath),
+            os.path.splitext(os.path.basename(self.input_filepath))[0] + '_x_' + os.path.splitext(os.path.basename(other.input_filepath))[0] +  os.path.splitext(os.path.basename(other.input_filepath))[1]
+        )
+        self.model_type = self.model_type if other.model_type == self.model_type else f'{self.model_type}_x_{other.model_type}'
+        return DepthMap(new_filepath, self.prediction * other.prediction)
+
+    def __rmul__(self, other: 'DepthMap'):
+        return self.__mul__(other)
+
+    def save(self, output_dir: str):
+        output_filename = output_dir + '/' + os.path.basename(self.input_filepath).split('.')[0] + '_depth_' + self.model_type
+        print(f'Saving to {output_filename}')
+        util.io.write_depth(output_filename, self.prediction, bits=2, absolute_depth=self.absolute)
+
+
 @define
 class DPTMonoDepth:
     """
@@ -18,18 +51,11 @@ class DPTMonoDepth:
     """
     model_type: str = field(default='dpt_hybrid')
     optimize: bool = field(default=True)
+    absolute_depth = field(default=True)
 
     device = field(init=False)
     model = field(init=False)
     transform = field(init=False)
-
-    models = {
-        "midas_v21": "weights/midas_v21-f6b98070.pt",
-        "dpt_large": "weights/dpt_large-midas-2f21e586.pt",
-        "dpt_hybrid": "weights/dpt_hybrid-midas-501f0c75.pt",
-        "dpt_hybrid_kitti": "weights/dpt_hybrid_kitti-cb926ef4.pt",
-        "dpt_hybrid_nyu": "weights/dpt_hybrid_nyu-2ce69ec7.pt",
-    }
 
     def __attrs_post_init__(self):
         print("Initializing...")
@@ -42,7 +68,7 @@ class DPTMonoDepth:
 
     def _prepare_model(self, model_type) -> tuple:
         print(f'Preparing model {model_type}')
-        model_path = f'{os.path.dirname(__file__)}/{self.models[model_type]}'
+        model_path = f'{os.path.dirname(__file__)}/{models[model_type]}'
 
         # load network
         if model_type == "dpt_large":
@@ -118,45 +144,31 @@ class DPTMonoDepth:
 
         return model, transform
 
-    def run(self, input_path: str, output_dir: str, model_type: str):
+    def predict_depths(self, input_path: str) -> list:
         """Run MonoDepthNN to compute depth maps for given path
 
         input_path (str): input dir or filename
         output_dir (str): output directory
         """
+        result = []
 
         if os.path.isdir(input_path):
-            for image_path in os.listdir(input_path):
-                if '.jpg' in image_path or '.png' in image_path:
-                    prediction = self.predict_depth(os.path.join(input_path, image_path))
-
-                    output_filename = output_dir + '/' + os.path.basename(image_path).split('.')[0] + '_depth'
-                    print(f'Saving to {output_filename}')
-                    util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
-
+            for image_name in os.listdir(input_path):
+                if '.jpg' in image_name or '.png' in image_name:
+                    filepath = os.path.join(input_path, image_name)
+                    result.append(self.__predict_single_depth(filepath))
         else:
-            prediction = self.predict_depth(input_path)
+            result.append(self.__predict_single_depth(input_path))
 
-            output_filename = output_dir + '/' + os.path.basename(input_path).split('.')[0] + '_depth_' + model_type
-            print(f'Saving to {output_filename}')
-            util.io.write_depth(output_filename, prediction, bits=2, absolute_depth=args.absolute_depth)
+        return result
 
-        print("finished")
-
-    def predict_depth(self, filepath: str):
+    def __predict_single_depth(self, filepath: str):
         print(f'Processing {filepath}')
 
         img = util.io.read_image(filepath)
 
-        if args.kitti_crop is True:
-            height, width, _ = img.shape
-            top = height - 352
-            left = (width - 1216) // 2
-            img = img[top: top + 352, left: left + 1216, :]
-
         img_input = self.transform({"image": img})["image"]
 
-        # compute
         with torch.no_grad():
             sample = torch.from_numpy(img_input).to(self.device).unsqueeze(0)
 
@@ -177,14 +189,16 @@ class DPTMonoDepth:
                 .numpy()
             )
 
-            if self.model_type == "dpt_hybrid_kitti":
-                prediction *= 256
-
             if self.model_type == "dpt_hybrid_nyu":
                 prediction *= 1000.0
                 prediction *= -1
 
-        return prediction
+        return DepthMap(
+            input_filepath=filepath,
+            prediction=prediction,
+            model_type=self.model_type,
+            absolute=self.absolute_depth
+        )
 
 
 if __name__ == "__main__":
@@ -229,11 +243,15 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
 
     # compute depth maps
-    DPTMonoDepth(
+    depths = DPTMonoDepth(
         args.model_type,
-        args.optimize
-    ).run(
-        args.input,
-        args.output_dir,
-        args.model_type
+        args.optimize,
+        args.absolute_depth
+    ).predict_depths(
+        args.input
     )
+
+    for depth in depths:
+        depth.save(args.output_dir)
+
+    print('Finished!')
